@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getAdminFromRequest, requireRole } from '@/lib/auth'
 import { logAudit } from '@/lib/audit'
-import { logoutSession } from '@/lib/impersonation'
+import { logoutSession, releaseLoginClient } from '@/lib/impersonation'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -42,7 +42,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       data: { status: 'EXPIRED' },
       include: { user: { select: { id: true, telegramId: true, firstName: true, lastName: true, username: true } } }
     })
-  } else if (row.status === 'PENDING' && row.expiresAt < now) {
+  } else if ((row.status === 'PENDING' || row.status === 'PENDING_PASSWORD') && row.expiresAt < now) {
+    // a stale pre-auth login (never finished) — drop its cached connection
+    await releaseLoginClient(row.id)
     row = await db.impersonationSession.update({
       where: { id: row.id },
       data: { status: 'EXPIRED' },
@@ -75,6 +77,9 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
 
   if (row.status === 'ACTIVE' && row.sessionString) {
     await logoutSession(row.sessionString)
+  } else if (row.status === 'PENDING' || row.status === 'PENDING_PASSWORD') {
+    // revoking mid-login — drop its cached connection too
+    await releaseLoginClient(row.id)
   }
   await db.impersonationSession.update({ where: { id: row.id }, data: { status: 'REVOKED' } })
 
